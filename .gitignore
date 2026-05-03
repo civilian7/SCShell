@@ -1,0 +1,62 @@
+# Build outputs
+/bin/
+/rata_shell/target/
+/rata_shell/include/
+
+# Logs
+*.log
+/logs/
+
+# Delphi build artifacts
+*.dcu
+*.local
+*.identcache
+*.stat
+*.dsk
+*.tvsconfig
+__history/
+__recovery/
+Win32/
+Win64/
+*.exe
+*.dll
+*.bpl
+*.bpi
+*.dcp
+*.so
+*.apk
+*.drc
+*.map
+*.dres
+*.rsm
+*.tds
+*.dcu
+*.lib
+*.a
+*.o
+*.ocx
+
+# Rust
+Cargo.lock.bak
+
+# IDE
+.vs/
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+*.bak
+*.swp
+desktop.ini
+
+# Editor backups
+*~
+\#*\#
+
+# Demo build leftovers
+/demo/Win32/
+/demo/Win64/
+/demo/__history/
+/demo/*.dproj.local
+/demo/*.identcache

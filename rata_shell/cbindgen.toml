@@ -1,0 +1,13 @@
+language = "C"
+header = "/* Auto-generated header for rata_shell.dll */"
+include_guard = "RATA_SHELL_H"
+pragma_once = true
+no_includes = false
+sys_includes = ["stdint.h", "stddef.h"]
+style = "type"
+
+[export]
+prefix = "Rata"
+
+[parse]
+parse_deps = false
