@@ -176,6 +176,11 @@ impl PtyHost {
         unsafe { ResizePseudoConsole(self.hpcon, size).map_err(RataError::from) }
     }
 
+    /// Win32 PID of the spawned child (0 if not running).
+    pub fn child_pid(&self) -> u32 {
+        self.process.dwProcessId
+    }
+
     pub fn try_exit_code(&self) -> Option<i32> {
         unsafe {
             let mut code: u32 = 0;

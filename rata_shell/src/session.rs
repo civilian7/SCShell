@@ -23,17 +23,25 @@ pub type RenderCallback = Box<dyn Fn(&RenderSnapshot, &str) + Send + Sync>;
 pub type ExitCallback = Box<dyn Fn(i32) + Send + Sync>;
 pub type BellCallback = Box<dyn Fn() + Send + Sync>;
 pub type TitleCallback = Box<dyn Fn(&str) + Send + Sync>;
+pub type ClipboardCallback = Box<dyn Fn(&str) + Send + Sync>;
 
 pub struct Callbacks {
     pub on_render: Option<RenderCallback>,
     pub on_exit: Option<ExitCallback>,
     pub on_bell: Option<BellCallback>,
     pub on_title: Option<TitleCallback>,
+    pub on_clipboard: Option<ClipboardCallback>,
 }
 
 impl Default for Callbacks {
     fn default() -> Self {
-        Callbacks { on_render: None, on_exit: None, on_bell: None, on_title: None }
+        Callbacks {
+            on_render: None,
+            on_exit: None,
+            on_bell: None,
+            on_title: None,
+            on_clipboard: None,
+        }
     }
 }
 
@@ -71,8 +79,18 @@ impl Session {
         }
     }
 
+    /// 4 메인 콜백을 한 번에 갱신 — on_clipboard 는 보존.
     pub fn set_callbacks(&self, cbs: Callbacks) {
-        *self.callbacks.lock() = cbs;
+        let mut cur = self.callbacks.lock();
+        cur.on_render = cbs.on_render;
+        cur.on_exit = cbs.on_exit;
+        cur.on_bell = cbs.on_bell;
+        cur.on_title = cbs.on_title;
+        // on_clipboard 는 set_clipboard_callback 으로 별도 관리.
+    }
+
+    pub fn set_clipboard_callback(&self, cb: Option<ClipboardCallback>) {
+        self.callbacks.lock().on_clipboard = cb;
     }
 
     pub fn start(&self) -> Result<(), RataError> {
@@ -137,9 +155,44 @@ impl Session {
                                 t.advance(&more);
                             }
 
+                            // alacritty Event 큐 처리 (Title/Bell/ClipboardStore 등).
+                            let events = {
+                                let mut t = term.lock();
+                                t.drain_events()
+                            };
+                            for ev in events {
+                                match ev {
+                                    alacritty_terminal::event::Event::Title(title) => {
+                                        let cb = callbacks.lock();
+                                        if let Some(f) = cb.on_title.as_ref() {
+                                            f(&title);
+                                        }
+                                    }
+                                    alacritty_terminal::event::Event::ResetTitle => {
+                                        let cb = callbacks.lock();
+                                        if let Some(f) = cb.on_title.as_ref() {
+                                            f("");
+                                        }
+                                    }
+                                    alacritty_terminal::event::Event::Bell => {
+                                        let cb = callbacks.lock();
+                                        if let Some(f) = cb.on_bell.as_ref() {
+                                            f();
+                                        }
+                                    }
+                                    alacritty_terminal::event::Event::ClipboardStore(_ty, text) => {
+                                        let cb = callbacks.lock();
+                                        if let Some(f) = cb.on_clipboard.as_ref() {
+                                            f(&text);
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+
                             let snap = {
-                                let t = term.lock();
-                                backend.lock().snapshot(&t)
+                                let mut t = term.lock();
+                                backend.lock().snapshot(&mut *t)
                             };
                             {
                                 crate::rlog!(
@@ -154,8 +207,8 @@ impl Session {
                         }
                         IoEvent::Eof => {
                             let snap = {
-                                let t = term.lock();
-                                backend.lock().snapshot(&t)
+                                let mut t = term.lock();
+                                backend.lock().snapshot(&mut *t)
                             };
                             {
                                 let cb = callbacks.lock();
@@ -206,7 +259,7 @@ impl Session {
 
     pub fn send_key(&self, vk: u32, mods: u32) -> Result<(), RataError> {
         let app = {
-            let t = self.term.lock();
+            let mut t = self.term.lock();
             // Read app cursor mode via snapshot (cheap).
             let mut buf = Vec::new();
             t.snapshot(&mut buf).app_cursor_keys
@@ -220,8 +273,8 @@ impl Session {
 
     pub fn request_render(&self) {
         let snap = {
-            let t = self.term.lock();
-            self.backend.lock().snapshot(&t)
+            let mut t = self.term.lock();
+            self.backend.lock().snapshot(&mut *t)
         };
         let cb = self.callbacks.lock();
         if let Some(f) = cb.on_render.as_ref() {
@@ -242,6 +295,111 @@ impl Session {
     pub fn cols_rows(&self) -> (u16, u16) {
         let t = self.term.lock();
         (t.cols(), t.rows())
+    }
+
+    /// Scroll display by `lines` and re-render.
+    pub fn scroll(&self, lines: i32) {
+        self.term.lock().scroll_display(lines);
+        self.request_render();
+    }
+
+    pub fn scroll_to_top(&self) {
+        self.term.lock().scroll_to_top();
+        self.request_render();
+    }
+
+    pub fn scroll_to_bottom(&self) {
+        self.term.lock().scroll_to_bottom();
+        self.request_render();
+    }
+
+    /// Returns (display_offset, configured_scrollback_max).
+    pub fn scroll_info(&self) -> (usize, usize) {
+        let off = self.term.lock().display_offset();
+        let max = self.options.lock().scrollback;
+        (off, max)
+    }
+
+    pub fn clear_history(&self) {
+        self.term.lock().clear_history();
+        self.request_render();
+    }
+
+    pub fn reset_state(&self) {
+        self.term.lock().reset_state();
+        self.request_render();
+    }
+
+    /// Current cached exit code (0 if still alive). Set by io pump on child exit.
+    pub fn exit_code(&self) -> i32 {
+        self.exit_code.load(Ordering::SeqCst)
+    }
+
+    /// PID of the spawned child (0 if not running).
+    pub fn child_pid(&self) -> u32 {
+        match self.pty.lock().as_ref() {
+            Some(p) => p.child_pid(),
+            None => 0,
+        }
+    }
+
+    /// Bit-flags for current TermMode (see TermHost::mode_flags).
+    pub fn mode_flags(&self) -> u32 {
+        self.term.lock().mode_flags()
+    }
+
+    pub fn selection_start(&self, col: u16, row: u16, kind: u8) {
+        self.term.lock().selection_start(col, row, kind);
+        self.request_render();
+    }
+
+    pub fn selection_extend(&self, col: u16, row: u16) {
+        self.term.lock().selection_extend(col, row);
+        self.request_render();
+    }
+
+    pub fn selection_clear(&self) {
+        self.term.lock().selection_clear();
+        self.request_render();
+    }
+
+    pub fn selection_to_string(&self) -> Option<String> {
+        self.term.lock().selection_to_string()
+    }
+
+    /// 현재 작업 디렉터리 (셸이 OSC 7 로 보고한 마지막 값).
+    pub fn current_cwd(&self) -> String {
+        self.term.lock().current_cwd.clone()
+    }
+
+    /// OSC 8 hyperlink id → URI 조회. id=0 이거나 없으면 빈 문자열.
+    pub fn hyperlink_uri(&self, id: u32) -> String {
+        if id == 0 { return String::new(); }
+        self.term.lock().hyperlinks.get(&id).cloned().unwrap_or_default()
+    }
+
+    /// VI navigation mode 토글 (alacritty 표준 — hjkl 이동 등).
+    pub fn toggle_vi_mode(&self) {
+        self.term.lock().toggle_vi_mode();
+        self.request_render();
+    }
+
+    /// VI mode 활성 여부.
+    pub fn vi_mode_active(&self) -> bool {
+        self.term.lock().vi_mode_active()
+    }
+
+    /// VI motion 실행 + 재렌더.
+    pub fn vi_motion(&self, kind: u8) {
+        self.term.lock().vi_motion(kind);
+        self.request_render();
+    }
+
+    /// Regex 검색 — 지정된 방향으로 다음 일치를 viewport 좌표로 반환.
+    /// 반환: (col, row, length_in_cells). 없으면 (0, 0, 0).
+    /// AForward: true = 아래/오른쪽, false = 위/왼쪽
+    pub fn search_next(&self, pattern: &str, forward: bool) -> (u16, u16, u16) {
+        self.term.lock().search_next(pattern, forward)
     }
 
     pub fn title(&self) -> String {

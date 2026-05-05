@@ -1,5 +1,5 @@
 { ============================================================================
-  SCShell.pas — FFI bindings for sc_shell64.dll
+  SCShell.pas — FFI bindings for sc_shell.dll (Win64)
   ============================================================================ }
 unit SCShell;
 
@@ -37,11 +37,41 @@ const
 
   RATA_DEFAULT_FLAG = $80000000;
 
-  {$IFDEF WIN64}
-  RATA_DLL = 'sc_shell64.dll';
-  {$ELSE}
-  RATA_DLL = 'sc_shell32.dll';
-  {$ENDIF}
+  { TermMode 비트 — RataRenderEvent.ModeFlags / get_mode_flags 반환값. }
+  RATA_MODE_ALT_SCREEN          = 1 shl 0;
+  RATA_MODE_APP_CURSOR          = 1 shl 1;
+  RATA_MODE_APP_KEYPAD          = 1 shl 2;
+  RATA_MODE_BRACKETED_PASTE     = 1 shl 3;
+  RATA_MODE_MOUSE_REPORT_CLICK  = 1 shl 4;
+  RATA_MODE_MOUSE_DRAG          = 1 shl 5;
+  RATA_MODE_MOUSE_MOTION        = 1 shl 6;
+  RATA_MODE_SGR_MOUSE           = 1 shl 7;
+  RATA_MODE_UTF8_MOUSE          = 1 shl 8;
+
+  { VI motion 종류 — rata_session_vi_motion 인자. }
+  RATA_VIM_UP                = 0;
+  RATA_VIM_DOWN              = 1;
+  RATA_VIM_LEFT              = 2;
+  RATA_VIM_RIGHT             = 3;
+  RATA_VIM_FIRST             = 4;
+  RATA_VIM_LAST              = 5;
+  RATA_VIM_FIRST_OCCUPIED    = 6;
+  RATA_VIM_HIGH              = 7;
+  RATA_VIM_MIDDLE            = 8;
+  RATA_VIM_LOW               = 9;
+  RATA_VIM_WORD_LEFT         = 10;
+  RATA_VIM_WORD_RIGHT        = 11;
+  RATA_VIM_WORD_LEFT_END     = 12;
+  RATA_VIM_WORD_RIGHT_END    = 13;
+  RATA_VIM_SEMANTIC_LEFT     = 14;
+  RATA_VIM_SEMANTIC_RIGHT    = 15;
+  RATA_VIM_SEMANTIC_LEFT_END = 16;
+  RATA_VIM_SEMANTIC_RIGHT_END= 17;
+  RATA_VIM_BRACKET           = 18;
+  RATA_VIM_PARAGRAPH_UP      = 19;
+  RATA_VIM_PARAGRAPH_DOWN    = 20;
+
+  RATA_DLL = 'sc_shell.dll';
 
 type
   TRataResult = Integer;
@@ -75,6 +105,7 @@ type
     Attrs: UInt16;
     Width: Byte;
     Pad: Byte;
+    HyperlinkId: UInt32;  { 0 = no link, 그 외 = get_hyperlink 로 URI 조회 }
   end;
   PRataCell = ^TRataCell;
 
@@ -85,18 +116,22 @@ type
     CursorY: UInt16;
     CursorVisible: Byte;
     CursorStyle: Byte;
-    Pad: array[0..1] of Byte;
+    AltActive: Byte;
+    Pad: Byte;
     DirtyRects: PRataRect;
     DirtyCount: NativeUInt;
     Cells: PRataCell;
     CellsLen: NativeUInt;
+    ModeFlags: UInt32;
+    Pad2: UInt32;
   end;
   PRataRenderEvent = ^TRataRenderEvent;
 
-  TRataRenderCb = procedure(AUser: Pointer; const AEvent: PRataRenderEvent); cdecl;
-  TRataExitCb   = procedure(AUser: Pointer; AExitCode: Integer); cdecl;
-  TRataBellCb   = procedure(AUser: Pointer); cdecl;
-  TRataTitleCb  = procedure(AUser: Pointer; AUtf8: PByte; ALen: NativeUInt); cdecl;
+  TRataRenderCb    = procedure(AUser: Pointer; const AEvent: PRataRenderEvent); cdecl;
+  TRataExitCb      = procedure(AUser: Pointer; AExitCode: Integer); cdecl;
+  TRataBellCb      = procedure(AUser: Pointer); cdecl;
+  TRataTitleCb     = procedure(AUser: Pointer; AUtf8: PByte; ALen: NativeUInt); cdecl;
+  TRataClipboardCb = procedure(AUser: Pointer; AUtf8: PByte; ALen: NativeUInt); cdecl;
 
 var
   rata_init: function(AFlags: UInt32): TRataResult; cdecl;
@@ -124,6 +159,35 @@ var
     out ACols, ARows: UInt16): TRataResult; cdecl;
   rata_session_get_title: function(AHandle: TRataSession;
     ABuf: PByte; ACap: NativeUInt): NativeUInt; cdecl;
+  rata_session_scroll: function(AHandle: TRataSession; ALines: Integer): TRataResult; cdecl;
+  rata_session_scroll_to_top: function(AHandle: TRataSession): TRataResult; cdecl;
+  rata_session_scroll_to_bottom: function(AHandle: TRataSession): TRataResult; cdecl;
+  rata_session_get_scroll_info: function(AHandle: TRataSession;
+    out AOffset, AMax: UInt32): TRataResult; cdecl;
+  rata_session_clear_history: function(AHandle: TRataSession): TRataResult; cdecl;
+  rata_session_reset: function(AHandle: TRataSession): TRataResult; cdecl;
+  rata_session_get_exit_code: function(AHandle: TRataSession): Integer; cdecl;
+  rata_session_get_child_pid: function(AHandle: TRataSession): UInt32; cdecl;
+  rata_session_get_mode_flags: function(AHandle: TRataSession): UInt32; cdecl;
+  rata_session_set_clipboard_callback: function(AHandle: TRataSession;
+    ACb: TRataClipboardCb; AUser: Pointer): TRataResult; cdecl;
+  rata_session_selection_start: function(AHandle: TRataSession;
+    ACol, ARow: UInt16; AKind: Byte): TRataResult; cdecl;
+  rata_session_selection_extend: function(AHandle: TRataSession;
+    ACol, ARow: UInt16): TRataResult; cdecl;
+  rata_session_selection_clear: function(AHandle: TRataSession): TRataResult; cdecl;
+  rata_session_selection_get_text: function(AHandle: TRataSession;
+    ABuf: PByte; ACap: NativeUInt): NativeUInt; cdecl;
+  rata_session_get_cwd: function(AHandle: TRataSession;
+    ABuf: PByte; ACap: NativeUInt): NativeUInt; cdecl;
+  rata_session_get_hyperlink: function(AHandle: TRataSession;
+    AId: UInt32; ABuf: PByte; ACap: NativeUInt): NativeUInt; cdecl;
+  rata_session_toggle_vi_mode: function(AHandle: TRataSession): TRataResult; cdecl;
+  rata_session_vi_mode_active: function(AHandle: TRataSession): Integer; cdecl;
+  rata_session_vi_motion: function(AHandle: TRataSession; AKind: Byte): TRataResult; cdecl;
+  rata_session_search_next: function(AHandle: TRataSession;
+    APattern: PByte; APatternLen: NativeUInt; AForward: Integer;
+    out ACol, ARow, ALen: UInt16): TRataResult; cdecl;
 
 /// <summary>DLL을 명시적 경로(또는 기본 검색 경로)로 로드합니다.</summary>
 /// <param name="ADllPath">DLL 경로. 빈 문자열이면 표준 검색 경로 사용</param>
@@ -186,6 +250,27 @@ begin
   @rata_session_is_alive      := GetProcRequired('rata_session_is_alive');
   @rata_session_get_size      := GetProcRequired('rata_session_get_size');
   @rata_session_get_title     := GetProcRequired('rata_session_get_title');
+  @rata_session_scroll          := GetProcRequired('rata_session_scroll');
+  @rata_session_scroll_to_top   := GetProcRequired('rata_session_scroll_to_top');
+  @rata_session_scroll_to_bottom:= GetProcRequired('rata_session_scroll_to_bottom');
+  @rata_session_get_scroll_info := GetProcRequired('rata_session_get_scroll_info');
+  @rata_session_clear_history   := GetProcRequired('rata_session_clear_history');
+  @rata_session_reset           := GetProcRequired('rata_session_reset');
+  @rata_session_get_exit_code   := GetProcRequired('rata_session_get_exit_code');
+  @rata_session_get_child_pid   := GetProcRequired('rata_session_get_child_pid');
+  @rata_session_get_mode_flags  := GetProcRequired('rata_session_get_mode_flags');
+  @rata_session_set_clipboard_callback :=
+    GetProcRequired('rata_session_set_clipboard_callback');
+  @rata_session_selection_start    := GetProcRequired('rata_session_selection_start');
+  @rata_session_selection_extend   := GetProcRequired('rata_session_selection_extend');
+  @rata_session_selection_clear    := GetProcRequired('rata_session_selection_clear');
+  @rata_session_selection_get_text := GetProcRequired('rata_session_selection_get_text');
+  @rata_session_get_cwd            := GetProcRequired('rata_session_get_cwd');
+  @rata_session_get_hyperlink      := GetProcRequired('rata_session_get_hyperlink');
+  @rata_session_toggle_vi_mode     := GetProcRequired('rata_session_toggle_vi_mode');
+  @rata_session_vi_mode_active     := GetProcRequired('rata_session_vi_mode_active');
+  @rata_session_vi_motion          := GetProcRequired('rata_session_vi_motion');
+  @rata_session_search_next        := GetProcRequired('rata_session_search_next');
 
   // Enable file logging by default during development. Log goes next to the
   // DLL (or %TEMP% as fallback).

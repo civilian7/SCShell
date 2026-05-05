@@ -10,6 +10,7 @@ mod error;
 mod ffi;
 mod io;
 mod keymap;
+mod listener;
 #[macro_use]
 mod log;
 mod pty;

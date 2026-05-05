@@ -335,17 +335,30 @@ begin
     FlushRun;
   end;
 
-  // Cursor block (XOR style).
+  // Cursor — style 별 분기. 0=block(default), 2/3=underline, 5/6=bar.
+  // 짝수=steady, 홀수=blinking (blinking 은 호스트 타이머가 visibility 토글).
   if (AEvent.CursorVisible <> 0)
      and (AEvent.CursorX < FCols)
      and (AEvent.CursorY < FRows) then
   begin
-    LRect := Rect(
-      AEvent.CursorX * FCellW,
-      AEvent.CursorY * FCellH,
-      (AEvent.CursorX + 1) * FCellW,
-      (AEvent.CursorY + 1) * FCellH);
-    InvertRect(LDC, LRect);
+    var LCx := AEvent.CursorX * FCellW;
+    var LCy := AEvent.CursorY * FCellH;
+    case AEvent.CursorStyle of
+      2, 3: { underline — 하단 1px 두께 */
+        begin
+          LRect := Rect(LCx, LCy + FCellH - 2, LCx + FCellW, LCy + FCellH);
+          InvertRect(LDC, LRect);
+        end;
+      5, 6: { bar — 좌측 2px 두께 }
+        begin
+          LRect := Rect(LCx, LCy, LCx + 2, LCy + FCellH);
+          InvertRect(LDC, LRect);
+        end;
+    else
+      { 0/1 (block / blinking block) — 기본 블록 invert }
+      LRect := Rect(LCx, LCy, LCx + FCellW, LCy + FCellH);
+      InvertRect(LDC, LRect);
+    end;
   end;
 end;
 

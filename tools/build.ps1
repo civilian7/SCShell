@@ -1,5 +1,6 @@
 # Build script for sc_shell.
-# 1) Build Rust DLL for x86_64 and i686 → sc_shell64.dll / sc_shell32.dll.
+# 1) Build Rust DLL for x86_64 → sc_shell.dll (64-bit only — host app is Win64).
+#    Legacy 32-bit name (sc_shell32.dll) retained behind -Rust32 flag for compat.
 # 2) Compile Delphi demo (Win64) with dcc64.
 
 param(
@@ -59,7 +60,7 @@ function Build-RustArch([string]$Triple, [string]$OutName) {
     Write-Host "DLL -> $dest" -ForegroundColor Green
 }
 
-function Build-Rust64 { Build-RustArch -Triple $Target64 -OutName 'sc_shell64.dll' }
+function Build-Rust64 { Build-RustArch -Triple $Target64 -OutName 'sc_shell.dll' }
 function Build-Rust32 { Build-RustArch -Triple $Target32 -OutName 'sc_shell32.dll' }
 
 function Build-Delphi {
@@ -88,10 +89,9 @@ $noFlag = -not ($Rust -or $Rust64 -or $Rust32 -or $Delphi -or $All)
 
 if ($All -or $noFlag) {
     Build-Rust64
-    Build-Rust32
     Build-Delphi
 } else {
-    if ($Rust)   { Build-Rust64; Build-Rust32 }
+    if ($Rust)   { Build-Rust64 }
     if ($Rust64) { Build-Rust64 }
     if ($Rust32) { Build-Rust32 }
     if ($Delphi) { Build-Delphi }

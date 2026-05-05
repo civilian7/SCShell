@@ -20,6 +20,10 @@ pub struct RenderSnapshot {
     pub cursor_style: u8,
     pub cells: Vec<HostCell>,
     pub dirty: Vec<RectU16>,
+    /// Alt-screen 활성 여부 (vim/less 전체화면 모드 감지용).
+    pub alt_active: bool,
+    /// TermMode 비트 (TermHost::mode_flags 참조).
+    pub mode_flags: u32,
 }
 
 pub struct HostBackend {
@@ -39,7 +43,7 @@ impl HostBackend {
         }
     }
 
-    pub fn snapshot(&mut self, term: &TermHost) -> RenderSnapshot {
+    pub fn snapshot(&mut self, term: &mut TermHost) -> RenderSnapshot {
         let meta: SnapshotMeta = term.snapshot(&mut self.cell_buf);
         let cols = meta.cols;
         let rows = meta.rows;
@@ -67,15 +71,18 @@ impl HostBackend {
         self.prev_cols = cols;
         self.prev_rows = rows;
 
+        let mode_flags = term.mode_flags();
         RenderSnapshot {
             cols,
             rows,
             cursor_x: meta.cursor_x,
             cursor_y: meta.cursor_y,
             cursor_visible: meta.cursor_visible,
-            cursor_style: 0,
+            cursor_style: meta.cursor_style,
             cells: cells_now,
             dirty,
+            alt_active: meta.alt_active,
+            mode_flags,
         }
     }
 }
