@@ -135,8 +135,8 @@ impl Session {
         drop(opts);
         drop(env_owned);
 
-        let reader = ReaderThread::spawn(&pty);
-        let writer = WriterThread::spawn(&pty);
+        let reader = ReaderThread::spawn(&pty)?;
+        let writer = WriterThread::spawn(&pty)?;
 
         let term = Arc::clone(&self.term);
         let backend = Arc::clone(&self.backend);
@@ -146,6 +146,8 @@ impl Session {
         let pty_arc = Arc::clone(&pty);
         let pty_watch = Arc::clone(&pty);   // 자식 감시 스레드용(아래) — pty 는 곧 self 로 move 된다.
         let rx = reader.rx.clone();
+        // ★터미널 질의 응답(DSR/CPR, 장치 속성 등)을 PTY 로 되써야 한다 — 아래 Event::PtyWrite.
+        let wtx = writer.tx.clone();
 
         alive.store(true, Ordering::SeqCst);
 
@@ -220,6 +222,16 @@ impl Session {
                                         if let Some(f) = f {
                                             f(&text);
                                         }
+                                    }
+                                    // ★터미널 질의에 대한 응답을 PTY 입력으로 되쓴다.
+                                    //
+                                    //   alacritty 는 DSR/CPR(CSI 6n — 커서 위치 질의), DA1/DA2(장치
+                                    //   속성) 같은 질의의 '답'을 Event::PtyWrite 로 내보낸다. 이걸
+                                    //   버리면 응답이 영영 가지 않아, 커서 위치를 묻는 셸/도구가
+                                    //   (bash/zsh 프롬프트 폭 계산, PSReadLine, vim, 일부 TUI 의
+                                    //   truecolor 프로브) 응답을 기다리며 멈추거나 오탐한다.
+                                    alacritty_terminal::event::Event::PtyWrite(text) => {
+                                        let _ = wtx.send(text.into_bytes());
                                     }
                                     _ => {}
                                 }

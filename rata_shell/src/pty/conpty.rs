@@ -6,13 +6,15 @@ use std::ffi::c_void;
 use std::mem::{size_of, zeroed};
 use std::ptr::null_mut;
 use windows::core::PWSTR;
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::Foundation::{
+    CloseHandle, DuplicateHandle, DUPLICATE_SAME_ACCESS, HANDLE,
+};
 use windows::Win32::System::Console::{
     ClosePseudoConsole, CreatePseudoConsole, ResizePseudoConsole, COORD, HPCON,
 };
 use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::Threading::{
-    CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
+    CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess, GetExitCodeProcess,
     InitializeProcThreadAttributeList, TerminateProcess, UpdateProcThreadAttribute,
     CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST,
     PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTUPINFOEXW, STARTUPINFOW,
@@ -25,6 +27,31 @@ pub struct PipeHandle(pub HANDLE);
 impl PipeHandle {
     pub fn raw(&self) -> HANDLE {
         self.0
+    }
+
+    /// 같은 파이프 끝을 가리키는 '자기 소유' 핸들 사본을 만든다.
+    ///
+    /// ★I/O 스레드가 PtyHost 소유의 raw HANDLE 을 그냥 복사해 쓰면, PtyHost 가 먼저 drop 될 때
+    ///   (PipeHandle::drop → CloseHandle) 스레드는 닫힌 핸들에 ReadFile/WriteFile 을 건다. Win32
+    ///   핸들 값은 즉시 재활용되므로 최악의 경우 남의 핸들에 I/O 를 거는 셈이 된다.
+    ///   그렇다고 스레드가 Arc<PtyHost> 를 붙들면 정반대의 교착이 난다 — ClosePseudoConsole 이
+    ///   리더 종료를 기다리고, 리더의 ReadFile 은 그 close 로만 EOF 를 받기 때문이다.
+    ///   해법은 복제다: 스레드는 자기 사본을 소유하고, hpcon 은 제때 닫힌다(파이프 읽기 끝의
+    ///   사본이 남아 있어도 쓰기 끝이 닫히면 EOF 는 정상적으로 온다).
+    pub fn duplicate(&self) -> Result<PipeHandle, RataError> {
+        unsafe {
+            let mut dup = HANDLE::default();
+            DuplicateHandle(
+                GetCurrentProcess(),
+                self.0,
+                GetCurrentProcess(),
+                &mut dup,
+                0,
+                false,
+                DUPLICATE_SAME_ACCESS,
+            )?;
+            Ok(PipeHandle(dup))
+        }
     }
 }
 
@@ -91,13 +118,22 @@ impl PtyHost {
             let mut attr_buf = vec![0u8; size_needed];
             let attr_list =
                 LPPROC_THREAD_ATTRIBUTE_LIST(attr_buf.as_mut_ptr() as *mut c_void);
-            InitializeProcThreadAttributeList(
+
+            // ★'?' 로 그냥 빠져나가면 이미 만든 hpcon/파이프가 샌다(CreatePseudoConsole 은
+            //   위에서 성공했다). 실패 경로마다 되돌린다.
+            if let Err(e) = InitializeProcThreadAttributeList(
                 Some(attr_list),
                 1,
                 Some(0),
                 &mut size_needed,
-            )?;
-            UpdateProcThreadAttribute(
+            ) {
+                let _ = ClosePseudoConsole(hpcon);
+                let _ = CloseHandle(input_write);
+                let _ = CloseHandle(output_read);
+                return Err(RataError::from(e));
+            }
+
+            if let Err(e) = UpdateProcThreadAttribute(
                 attr_list,
                 0,
                 PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE as usize,
@@ -105,7 +141,13 @@ impl PtyHost {
                 size_of::<HPCON>(),
                 None,
                 None,
-            )?;
+            ) {
+                DeleteProcThreadAttributeList(attr_list);
+                let _ = ClosePseudoConsole(hpcon);
+                let _ = CloseHandle(input_write);
+                let _ = CloseHandle(output_read);
+                return Err(RataError::from(e));
+            }
 
             let mut si: STARTUPINFOEXW = zeroed();
             si.StartupInfo = STARTUPINFOW {
@@ -155,7 +197,21 @@ impl PtyHost {
                 return Err(RataError::from(e));
             }
 
-            job.assign(&pi)?;
+            // ★job.assign 실패 시 '?' 로 빠져나가면 안 된다 — CreateProcessW 는 이미 성공했다.
+            //   조기 반환하면 hpcon/파이프/프로세스 핸들이 새고, 무엇보다 자식 셸이 job 에 붙지
+            //   않은 채 고아로 살아남는다(KILL_ON_JOB_CLOSE 도 안 걸린다).
+            //   AssignProcessToJobObject 는 호스트가 nested job 을 허용하지 않는 job 안에서 돌 때
+            //   (일부 CI/샌드박스/디버거 환경) 실제로 실패한다.
+            if let Err(e) = job.assign(&pi) {
+                let _ = TerminateProcess(pi.hProcess, 1);
+                let _ = CloseHandle(pi.hThread);
+                let _ = CloseHandle(pi.hProcess);
+                DeleteProcThreadAttributeList(attr_list);
+                let _ = ClosePseudoConsole(hpcon);
+                let _ = CloseHandle(input_write);
+                let _ = CloseHandle(output_read);
+                return Err(e);
+            }
 
             Ok(PtyHost {
                 hpcon,
@@ -181,15 +237,24 @@ impl PtyHost {
         self.process.dwProcessId
     }
 
+    /// 자식이 끝났으면 종료 코드를, 아직 살아 있으면 None.
+    ///
+    /// ★생존 판정을 GetExitCodeProcess 의 STILL_ACTIVE(259) 로 하면 안 된다. 259 는 정당한
+    ///   종료 코드이기도 해서, 셸이 실제로 259 로 끝나면 영원히 "아직 살아 있다"로 읽힌다 —
+    ///   감시 스레드가 무한 폴링하고 on_exit 이 영영 발화하지 않는다.
+    ///   프로세스 핸들이 시그널되었는지(WaitForSingleObject timeout=0)로 먼저 판정한다.
     pub fn try_exit_code(&self) -> Option<i32> {
+        use windows::Win32::Foundation::WAIT_OBJECT_0;
+        use windows::Win32::System::Threading::WaitForSingleObject;
+
         unsafe {
+            if WaitForSingleObject(self.process.hProcess, 0) != WAIT_OBJECT_0 {
+                return None; // 아직 실행 중(또는 대기 실패) — 종료하지 않았다.
+            }
+
             let mut code: u32 = 0;
             if GetExitCodeProcess(self.process.hProcess, &mut code).is_ok() {
-                if code == STILL_ACTIVE {
-                    None
-                } else {
-                    Some(code as i32)
-                }
+                Some(code as i32)
             } else {
                 None
             }

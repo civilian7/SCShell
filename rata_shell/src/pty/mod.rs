@@ -3,4 +3,4 @@
 mod conpty;
 mod job;
 
-pub use conpty::PtyHost;
+pub use conpty::{PipeHandle, PtyHost};
