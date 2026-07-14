@@ -204,6 +204,16 @@ impl TermHost {
         self.term.grid().display_offset()
     }
 
+    /// Lines actually held in the scrollback right now — i.e. how far up we can scroll.
+    ///
+    /// This is NOT the configured scrollback limit. The host draws its scrollbar thumb from
+    /// this, so reporting the limit (e.g. 10000) while only 100 lines exist makes the thumb
+    /// tiny and its position meaningless.
+    pub fn history_size(&self) -> usize {
+        use alacritty_terminal::grid::Dimensions;
+        self.term.grid().history_size()
+    }
+
     /// Clear scrollback (history) but keep current viewport.
     pub fn clear_history(&mut self) {
         use alacritty_terminal::vte::ansi::ClearMode;

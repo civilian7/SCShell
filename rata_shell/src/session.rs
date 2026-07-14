@@ -313,11 +313,13 @@ impl Session {
         self.request_render();
     }
 
-    /// Returns (display_offset, configured_scrollback_max).
+    /// Returns (display_offset, history_size) — both in lines.
     pub fn scroll_info(&self) -> (usize, usize) {
-        let off = self.term.lock().display_offset();
-        let max = self.options.lock().scrollback;
-        (off, max)
+        // ★max 는 '설정된 scrollback 한도'가 아니라 '지금 스크롤백에 실제로 쌓인 줄 수'다.
+        //   한도(예: 10000)를 돌려주면 호스트 스크롤바의 thumb 이 늘 극단적으로 작고 위치도
+        //   실제 내용과 어긋난다 — 100줄만 있어도 10000줄 기준으로 그리게 되기 때문이다.
+        let t = self.term.lock();
+        (t.display_offset(), t.history_size())
     }
 
     pub fn clear_history(&self) {
