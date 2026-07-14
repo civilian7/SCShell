@@ -83,6 +83,11 @@ pub struct TermHost {
     osc7_buf: Vec<u8>,
     /// OSC 8 hyperlinks — id → URI. snapshot 시 cell 의 hyperlink 를 hash → 등록.
     pub hyperlinks: HashMap<u32, String>,
+
+    /// 검색 커서 — 마지막 매치. 다음 search_next 는 여기서 '한 칸 앞'부터 찾는다.
+    /// 이게 없으면 매번 grid 커서에서 다시 찾아 같은 매치만 무한 반복된다(F3 이 안 먹는다).
+    search_pattern: String,
+    search_origin: Option<alacritty_terminal::index::Point>,
 }
 
 impl TermHost {
@@ -103,6 +108,8 @@ impl TermHost {
             osc7_state: 0,
             osc7_buf: Vec::new(),
             hyperlinks: HashMap::new(),
+            search_pattern: String::new(),
+            search_origin: None,
         }
     }
 
@@ -272,36 +279,101 @@ impl TermHost {
 
     /// Regex 검색. 매치 시작 좌표 (viewport 0-based) + 길이 반환.
     /// 매치 없으면 (0, 0, 0).
+    ///
+    /// ★반복 호출하면 '다음' 매치로 넘어간다. 검색 커서(search_origin)를 유지하지 않으면
+    ///   매번 grid 커서에서 다시 찾게 되어 언제나 같은 매치만 나온다(F3/Shift+F3 이 무의미해진다).
+    ///   패턴이 바뀌면 커서를 리셋한다.
+    ///
+    /// ★매치가 화면 밖(히스토리)이면 좌표를 clamp 하지 않는다 — clamp 는 엉뚱한 행을 가리키는
+    ///   거짓 좌표를 만든다. 대신 그 매치가 보이도록 뷰포트를 스크롤한 뒤 좌표를 계산한다.
     pub fn search_next(&mut self, pattern: &str, forward: bool) -> (u16, u16, u16) {
-        use alacritty_terminal::index::{Boundary, Direction, Point};
+        use alacritty_terminal::grid::Scroll;
+        use alacritty_terminal::index::{Boundary, Column, Direction, Line, Point};
         use alacritty_terminal::term::search::RegexSearch;
+
+        if pattern.is_empty() {
+            return (0, 0, 0);
+        }
+
         let mut regex = match RegexSearch::new(pattern) {
             Ok(r) => r,
             Err(_) => return (0, 0, 0),
         };
-        // 검색 시작점 — 현재 viewport 가운데 또는 cursor 위치.
-        let cursor = self.term.grid().cursor.point;
-        let dir = if forward { Direction::Right } else { Direction::Left };
-        let result = match dir {
-            Direction::Right => self.term.regex_search_right(&mut regex, cursor,
-                Point::new(alacritty_terminal::index::Line(self.size.lines as i32),
-                           alacritty_terminal::index::Column(self.size.cols))),
-            Direction::Left => self.term.regex_search_left(&mut regex, cursor,
-                Point::new(alacritty_terminal::index::Line(-(self.size.lines as i32)),
-                           alacritty_terminal::index::Column(0))),
-        };
-        match result {
-            Some(range) => {
-                let s = *range.start();
-                let e = *range.end();
-                let off = self.term.grid().display_offset() as i32;
-                let row = (s.line.0 + off).clamp(0, self.size.lines as i32 - 1) as u16;
-                let col = s.column.0 as u16;
-                let len = (e.column.0 + 1).saturating_sub(s.column.0) as u16;
-                (col, row, len)
-            }
-            None => (0, 0, 0),
+
+        // 패턴이 바뀌면 처음부터 — 이전 패턴의 매치 위치에서 이어가면 안 된다.
+        if self.search_pattern != pattern {
+            self.search_pattern = pattern.to_string();
+            self.search_origin = None;
         }
+
+        let dir = if forward { Direction::Right } else { Direction::Left };
+
+        // 시작점: 직전 매치가 있으면 그 한 칸 옆, 없으면 현재 커서.
+        // 한 칸 옮기지 않으면 같은 매치를 다시 집어 제자리걸음한다.
+        let origin = match self.search_origin {
+            Some(p) => match dir {
+                Direction::Right => p.add(self.term.grid(), Boundary::Grid, 1),
+                Direction::Left => p.sub(self.term.grid(), Boundary::Grid, 1),
+            },
+            None => self.term.grid().cursor.point,
+        };
+
+        // 검색 경계 — 스크롤백 전체를 훑는다(뷰포트만 보면 히스토리의 매치를 놓친다).
+        let history = self.term.grid().history_size() as i32;
+        let result = match dir {
+            Direction::Right => self.term.regex_search_right(
+                &mut regex,
+                origin,
+                Point::new(Line(self.size.lines as i32 - 1), Column(self.size.cols - 1)),
+            ),
+            Direction::Left => self.term.regex_search_left(
+                &mut regex,
+                origin,
+                Point::new(Line(-history), Column(0)),
+            ),
+        };
+
+        let range = match result {
+            Some(r) => r,
+            None => {
+                // 끝까지 못 찾았다 — 다음 호출은 처음부터 다시 돌도록 커서를 푼다(wrap-around).
+                self.search_origin = None;
+                return (0, 0, 0);
+            }
+        };
+
+        let start = *range.start();
+        let end = *range.end();
+        self.search_origin = Some(start);
+
+        // 매치가 뷰포트 밖이면 보이도록 스크롤한다.
+        // grid Line 은 0..lines-1 이 화면, 음수가 히스토리다. display_offset(off) 이면
+        // 화면에 보이는 grid Line 은 -off .. lines-1-off 구간이다.
+        let mut off = self.term.grid().display_offset() as i32;
+        if start.line.0 < -off {
+            // 매치가 화면 위(더 오래된 히스토리) — 위로 스크롤.
+            self.term.scroll_display(Scroll::Delta(-off - start.line.0));
+            off = self.term.grid().display_offset() as i32;
+        } else if start.line.0 > self.size.lines as i32 - 1 - off {
+            // 매치가 화면 아래 — 아래로 스크롤.
+            self.term
+                .scroll_display(Scroll::Delta(self.size.lines as i32 - 1 - off - start.line.0));
+            off = self.term.grid().display_offset() as i32;
+        }
+
+        let row = start.line.0 + off;
+        if row < 0 || row >= self.size.lines as i32 {
+            return (0, 0, 0); // 스크롤로도 못 담았다 — 거짓 좌표를 주느니 '없음'을 준다.
+        }
+
+        // 길이 — 매치가 여러 줄에 걸치면 시작 줄의 끝까지로 자른다(호출자는 한 줄 하이라이트).
+        let len = if end.line == start.line {
+            (end.column.0 + 1).saturating_sub(start.column.0)
+        } else {
+            self.size.cols.saturating_sub(start.column.0)
+        };
+
+        (start.column.0 as u16, row as u16, len as u16)
     }
 
     /// 선택 영역 시작. (col, row) 는 viewport 0-based 셀 좌표.
