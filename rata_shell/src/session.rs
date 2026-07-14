@@ -19,11 +19,17 @@ pub struct SpawnOptions {
     pub scrollback: usize,
 }
 
-pub type RenderCallback = Box<dyn Fn(&RenderSnapshot, &str) + Send + Sync>;
-pub type ExitCallback = Box<dyn Fn(i32) + Send + Sync>;
-pub type BellCallback = Box<dyn Fn() + Send + Sync>;
-pub type TitleCallback = Box<dyn Fn(&str) + Send + Sync>;
-pub type ClipboardCallback = Box<dyn Fn(&str) + Send + Sync>;
+// ★Box 가 아니라 Arc 다 — 호출 전에 clone 해서 '락 밖에서' 부르기 위해서다.
+//
+//   콜백을 callbacks 락을 쥔 채 호출하면, 호스트 핸들러가 그 안에서 rata_* 를 하나라도 다시
+//   부르는 순간(on_render 에서 스크롤/재렌더는 흔한 패턴이다) 그 FFI 함수가 같은 락을 다시
+//   잡으려 한다. parking_lot::Mutex 는 비재진입이라 같은 스레드가 자기 락을 재획득하려다
+//   즉시 영구 데드락에 빠진다.
+pub type RenderCallback = Arc<dyn Fn(&RenderSnapshot, &str) + Send + Sync>;
+pub type ExitCallback = Arc<dyn Fn(i32) + Send + Sync>;
+pub type BellCallback = Arc<dyn Fn() + Send + Sync>;
+pub type TitleCallback = Arc<dyn Fn(&str) + Send + Sync>;
+pub type ClipboardCallback = Arc<dyn Fn(&str) + Send + Sync>;
 
 pub struct Callbacks {
     pub on_render: Option<RenderCallback>,
@@ -192,26 +198,26 @@ impl Session {
                             for ev in events {
                                 match ev {
                                     alacritty_terminal::event::Event::Title(title) => {
-                                        let cb = callbacks.lock();
-                                        if let Some(f) = cb.on_title.as_ref() {
-                                            f(&title);
+                                        let f = callbacks.lock().on_title.clone();
+                                        if let Some(f) = f {
+                                            f(&title);   // 락 밖에서 호출(재진입 데드락 방지)
                                         }
                                     }
                                     alacritty_terminal::event::Event::ResetTitle => {
-                                        let cb = callbacks.lock();
-                                        if let Some(f) = cb.on_title.as_ref() {
+                                        let f = callbacks.lock().on_title.clone();
+                                        if let Some(f) = f {
                                             f("");
                                         }
                                     }
                                     alacritty_terminal::event::Event::Bell => {
-                                        let cb = callbacks.lock();
-                                        if let Some(f) = cb.on_bell.as_ref() {
+                                        let f = callbacks.lock().on_bell.clone();
+                                        if let Some(f) = f {
                                             f();
                                         }
                                     }
                                     alacritty_terminal::event::Event::ClipboardStore(_ty, text) => {
-                                        let cb = callbacks.lock();
-                                        if let Some(f) = cb.on_clipboard.as_ref() {
+                                        let f = callbacks.lock().on_clipboard.clone();
+                                        if let Some(f) = f {
                                             f(&text);
                                         }
                                     }
@@ -229,9 +235,9 @@ impl Session {
                                     snap.cols, snap.rows, snap.cursor_x, snap.cursor_y
                                 );
                             }
-                            let cb = callbacks.lock();
-                            if let Some(f) = cb.on_render.as_ref() {
-                                f(&snap, "");
+                            let f = callbacks.lock().on_render.clone();
+                            if let Some(f) = f {
+                                f(&snap, "");   // 락 밖에서 호출
                             }
                         }
                         IoEvent::Eof => {
@@ -246,8 +252,8 @@ impl Session {
                             backend.lock().snapshot(&mut *t)
                         };
                         {
-                            let cb = callbacks.lock();
-                            if let Some(f) = cb.on_render.as_ref() {
+                            let f = callbacks.lock().on_render.clone();
+                            if let Some(f) = f {
                                 f(&snap, "");
                             }
                         }
@@ -257,8 +263,8 @@ impl Session {
 
                         // 자식 감시 스레드와 경쟁한다 — swap 으로 먼저 온 쪽만 통지한다.
                         if alive.swap(false, Ordering::SeqCst) {
-                            let cb = callbacks.lock();
-                            if let Some(f) = cb.on_exit.as_ref() {
+                            let f = callbacks.lock().on_exit.clone();
+                            if let Some(f) = f {
                                 f(code);
                             }
                         }
@@ -294,9 +300,9 @@ impl Session {
                     if let Some(code) = pty_w.try_exit_code() {
                         code_w.store(code, Ordering::SeqCst);
                         if alive_w.swap(false, Ordering::SeqCst) {
-                            let cb = cbs_w.lock();
-                            if let Some(f) = cb.on_exit.as_ref() {
-                                f(code);
+                            let f = cbs_w.lock().on_exit.clone();
+                            if let Some(f) = f {
+                                f(code);   // 락 밖에서 호출
                             }
                         }
                         break;
@@ -362,9 +368,9 @@ impl Session {
             let mut t = self.term.lock();
             self.backend.lock().snapshot(&mut *t)
         };
-        let cb = self.callbacks.lock();
-        if let Some(f) = cb.on_render.as_ref() {
-            f(&snap, "");
+        let f = self.callbacks.lock().on_render.clone();
+        if let Some(f) = f {
+            f(&snap, "");   // 락 밖에서 호출 — 호스트가 여기서 rata_* 를 다시 불러도 안전하다.
         }
     }
 
@@ -522,12 +528,25 @@ impl Drop for Session {
 
         // ③ 스레드를 전부 회수한다. 감시 스레드를 join 하지 않으면 세션이 사라진 뒤에도
         //    살아남아 Arc 로 붙든 자원을 만진다(그리고 DLL 이 언로드되면 실행 중 코드가 사라진다).
+        //
+        //    ★단, '자기 자신'은 join 하지 않는다.
+        //    on_exit 은 pump(또는 watcher) 스레드에서 호출된다. 호스트가 그 콜백 안에서
+        //    세션을 파괴하는 건 지극히 자연스러운 패턴인데("셸이 끝났으니 정리한다"),
+        //    그러면 Drop 이 자기가 실행 중인 스레드를 join 하려 들어 영구 데드락이 된다.
+        //    그 경우 스레드는 곧 콜백에서 빠져나와 스스로 끝나므로 detach 해도 안전하다
+        //    (콜백은 위 ①에서 이미 비웠으니 더는 호스트로 나가지 않는다).
+        let cur_thread = std::thread::current().id();
+
         if let Some(j) = self.pump.lock().take() {
-            let _ = j.join();
+            if j.thread().id() != cur_thread {
+                let _ = j.join();
+            }
         }
 
         if let Some(j) = self.watcher.lock().take() {
-            let _ = j.join();
+            if j.thread().id() != cur_thread {
+                let _ = j.join();
+            }
         }
 
         let _ = self.reader.lock().take();

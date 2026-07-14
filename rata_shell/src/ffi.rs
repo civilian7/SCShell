@@ -301,7 +301,7 @@ pub extern "C" fn rata_session_set_callbacks(
         let user_addr = user as usize;
 
         let render_cb = on_render.map(|cb| {
-            Box::new(move |snap: &crate::render::RenderSnapshot, _title: &str| {
+            std::sync::Arc::new(move |snap: &crate::render::RenderSnapshot, _title: &str| {
                 let rects: Vec<RataRect> = snap
                     .dirty
                     .iter()
@@ -330,21 +330,21 @@ pub extern "C" fn rata_session_set_callbacks(
         });
 
         let exit_cb = on_exit.map(|cb| {
-            Box::new(move |code: i32| {
+            std::sync::Arc::new(move |code: i32| {
                 let u = user_addr as *mut c_void;
                 let _ = catch_unwind(AssertUnwindSafe(|| cb(u, code)));
             }) as crate::session::ExitCallback
         });
 
         let bell_cb = on_bell.map(|cb| {
-            Box::new(move || {
+            std::sync::Arc::new(move || {
                 let u = user_addr as *mut c_void;
                 let _ = catch_unwind(AssertUnwindSafe(|| cb(u)));
             }) as crate::session::BellCallback
         });
 
         let title_cb = on_title.map(|cb| {
-            Box::new(move |t: &str| {
+            std::sync::Arc::new(move |t: &str| {
                 let u = user_addr as *mut c_void;
                 let _ = catch_unwind(AssertUnwindSafe(|| {
                     cb(u, t.as_ptr(), t.len())
@@ -588,7 +588,7 @@ pub extern "C" fn rata_session_set_clipboard_callback(
         };
         let user_addr = user as usize;
         let cb = cb.map(|cb| {
-            Box::new(move |t: &str| {
+            std::sync::Arc::new(move |t: &str| {
                 let u = user_addr as *mut c_void;
                 let _ = catch_unwind(AssertUnwindSafe(|| cb(u, t.as_ptr(), t.len())));
             }) as crate::session::ClipboardCallback
