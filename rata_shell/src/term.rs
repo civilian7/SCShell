@@ -385,8 +385,13 @@ impl TermHost {
         let mut hl_uris: Vec<Option<String>> = Vec::with_capacity(cols * rows);
         {
             let grid = self.term.grid();
+            // ★viewport row → grid Line 은 display_offset 보정이 필요하다.
+            //   이 보정이 없으면 스크롤(scroll_display)로 display_offset 이 바뀌어도 snapshot 이
+            //   늘 활성 영역(라이브 화면)만 읽어, 호스트에는 스크롤해도 같은 화면이 전달된다.
+            //   (selection_start/extend 등 다른 좌표 변환은 이미 같은 보정을 한다.)
+            let off = grid.display_offset() as i32;
             for line_idx in 0..rows as i32 {
-                let line = alacritty_terminal::index::Line(line_idx);
+                let line = alacritty_terminal::index::Line(line_idx - off);
                 for col in 0..cols {
                     let cell = &grid[line][Column(col)];
                     cells.push(convert_cell(cell));
@@ -405,8 +410,13 @@ impl TermHost {
         let grid = self.term.grid();
         let cursor_pos = grid.cursor.point;
         let cursor_x = (cursor_pos.column.0 as i32).clamp(0, cols as i32 - 1) as u16;
-        let cursor_line = cursor_pos.line.0;
-        let cursor_y = cursor_line.clamp(0, rows as i32 - 1) as u16;
+        // ★grid Line → viewport row 도 display_offset 보정이 필요하다(셀과 같은 좌표계).
+        //   보정이 없으면 스크롤해도 커서가 원래 자리에 그대로 남는다.
+        let cursor_off = grid.display_offset() as i32;
+        let cursor_line_vp = cursor_pos.line.0 + cursor_off;
+        // 스크롤로 커서가 화면 밖으로 나가면 숨긴다 — clamp 만 하면 가장자리에 눌러붙는다.
+        let cursor_in_view = cursor_line_vp >= 0 && cursor_line_vp < rows as i32;
+        let cursor_y = cursor_line_vp.clamp(0, rows as i32 - 1) as u16;
         // VT 표준 매핑: 0=block default, 2=steady block, 3=blink underline,
         // 4=steady underline, 5=blink bar, 6=steady bar.
         let style = self.term.cursor_style();
@@ -424,7 +434,8 @@ impl TermHost {
             cursor_x,
             cursor_y,
             cursor_visible: self.term.mode().contains(TermMode::SHOW_CURSOR)
-                && style.shape != CursorShape::Hidden,
+                && style.shape != CursorShape::Hidden
+                && cursor_in_view,
             alt_active: self.alt_active(),
             app_cursor_keys: self.term.mode().contains(TermMode::APP_CURSOR),
             cursor_style,
