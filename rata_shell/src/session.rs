@@ -134,6 +134,7 @@ impl Session {
         let alive = Arc::clone(&self.alive);
         let exit_code = Arc::clone(&self.exit_code);
         let pty_arc = Arc::clone(&pty);
+        let pty_watch = Arc::clone(&pty);   // 자식 감시 스레드용(아래) — pty 는 곧 self 로 move 된다.
         let rx = reader.rx.clone();
 
         alive.store(true, Ordering::SeqCst);
@@ -218,10 +219,12 @@ impl Session {
                             }
                             let code = pty_arc.try_exit_code().unwrap_or(0);
                             exit_code.store(code, Ordering::SeqCst);
-                            alive.store(false, Ordering::SeqCst);
-                            let cb = callbacks.lock();
-                            if let Some(f) = cb.on_exit.as_ref() {
-                                f(code);
+                            // 자식 감시 스레드와 경쟁한다 — swap 으로 먼저 온 쪽만 통지한다.
+                            if alive.swap(false, Ordering::SeqCst) {
+                                let cb = callbacks.lock();
+                                if let Some(f) = cb.on_exit.as_ref() {
+                                    f(code);
+                                }
                             }
                             break;
                         }
@@ -231,6 +234,43 @@ impl Session {
             .expect("spawn pump");
 
         *self.pty.lock() = Some(pty);
+        // ★자식 프로세스 감시 — PTY 읽기 EOF 만으로는 셸 종료를 놓친다.
+        //
+        //   ConPTY 는 자식(powershell)이 죽어도 conhost 가 파이프의 쓰기 끝을 붙들고 있어 EOF 가
+        //   오지 않는 경우가 있다. 실제로 터미널에 'exit' 를 쳐서 셸이 사라져도 io pump 는 계속
+        //   기다렸고, on_exit 이 영영 발화하지 않아 호스트는 셸이 죽은 줄 몰랐다.
+        //
+        //   자식 핸들을 직접 폴링해 종료를 잡는다. EOF 경로와 경쟁하므로 alive 를 swap 해서
+        //   먼저 온 쪽만 on_exit 을 부른다(중복 통지 금지).
+        {
+            let pty_w = pty_watch;
+            let alive_w = Arc::clone(&self.alive);
+            let code_w = Arc::clone(&self.exit_code);
+            let cbs_w = Arc::clone(&self.callbacks);
+
+            std::thread::Builder::new()
+                .name("rata-child-watch".into())
+                .spawn(move || loop {
+                    if !alive_w.load(Ordering::SeqCst) {
+                        break; // EOF 경로가 이미 처리했다.
+                    }
+
+                    if let Some(code) = pty_w.try_exit_code() {
+                        code_w.store(code, Ordering::SeqCst);
+                        if alive_w.swap(false, Ordering::SeqCst) {
+                            let cb = cbs_w.lock();
+                            if let Some(f) = cb.on_exit.as_ref() {
+                                f(code);
+                            }
+                        }
+                        break;
+                    }
+
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                })
+                .expect("spawn child watcher");
+        }
+
         *self.reader.lock() = Some(reader);
         *self.writer.lock() = Some(writer);
         *self.pump.lock() = Some(pump);
