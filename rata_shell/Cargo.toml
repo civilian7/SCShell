@@ -39,11 +39,15 @@ features = [
 opt-level = 3
 lto = "thin"
 codegen-units = 1
-panic = "abort"
+# ★panic = "abort" 를 쓰면 안 된다. ffi.rs 의 모든 진입점이 catch_unwind 로 panic 이 FFI 경계를
+#   넘지 않게 막고 RATA_ERR_PANIC 을 돌려주도록 설계돼 있는데, abort 에서는 panic 이 언와인드
+#   자체를 하지 않고 즉시 프로세스를 죽인다 — 그 가드가 전부 죽은 코드가 되고, alacritty 내부의
+#   인덱스 panic 하나로 Delphi 호스트가 통째로 abort 된다.
+panic = "unwind"
 strip = "symbols"
 
 [profile.dev]
-panic = "abort"
+panic = "unwind"
 
 [build-dependencies]
 cbindgen = "0.27"

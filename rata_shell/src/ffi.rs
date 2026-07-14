@@ -217,10 +217,19 @@ pub extern "C" fn rata_session_destroy(handle: RataSession) -> RataResult {
         if handle.is_null() {
             return RATA_OK;
         }
-        let s = unsafe { &*(handle as *const Session) };
+        let s = unsafe { &mut *(handle as *mut Session) };
         if s.magic != SESSION_MAGIC {
             return store(&RataError::Invalid);
         }
+
+        // ★해제 '전에' magic 을 지운다.
+        //
+        //   지우지 않으면 double destroy 가 통과한다: 두 번째 호출이 해제된 힙을 읽는데,
+        //   Windows 힙은 free 직후 내용을 즉시 뭉개지 않는 경우가 많아 magic 이 그대로
+        //   0x52415441 로 읽히고 → Box::from_raw 가 다시 실행되어 이중 free/힙 손상이 된다.
+        //   (완전한 방어는 핸들 레지스트리가 필요하지만, 이 한 줄이 현실의 대부분을 막는다.)
+        s.magic = 0;
+
         let _ = unsafe { Box::from_raw(handle as *mut Session) };
         RATA_OK
     })

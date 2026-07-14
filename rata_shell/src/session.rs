@@ -54,6 +54,9 @@ pub struct Session {
     backend: Arc<Mutex<HostBackend>>,
     callbacks: Arc<Mutex<Callbacks>>,
     pump: Mutex<Option<JoinHandle<()>>>,
+    /// 자식 프로세스 감시 스레드. **반드시 보관해서 Drop 에서 join 해야 한다** —
+    /// 버리면 세션이 해제된 뒤에도 살아남아 호스트 콜백(이미 해제된 인스턴스)을 호출한다.
+    watcher: Mutex<Option<JoinHandle<()>>>,
     alive: Arc<AtomicBool>,
     exit_code: Arc<AtomicI32>,
     options: Mutex<SpawnOptions>,
@@ -73,6 +76,7 @@ impl Session {
             backend: Arc::new(Mutex::new(HostBackend::new())),
             callbacks: Arc::new(Mutex::new(Callbacks::default())),
             pump: Mutex::new(None),
+            watcher: Mutex::new(None),
             alive: Arc::new(AtomicBool::new(false)),
             exit_code: Arc::new(AtomicI32::new(0)),
             options: Mutex::new(options),
@@ -142,18 +146,42 @@ impl Session {
         let pump = std::thread::Builder::new()
             .name("rata-pump".into())
             .spawn(move || {
-                while let Ok(ev) = rx.recv() {
+                loop {
+                    let ev = match rx.recv() {
+                        Ok(e) => e,
+                        Err(_) => break, // 채널 단절 — reader 가 사라졌다.
+                    };
+
+                    // Eof 를 어느 경로에서 보든 아래 한 곳에서 처리한다.
+                    let mut saw_eof = false;
+
                     match ev {
                         IoEvent::Bytes(buf) => {
                             {
                                 let mut t = term.lock();
                                 t.advance(&buf);
                             }
-                            // Drain any extra buffered input within a small budget
-                            // before snapshotting, to coalesce frames.
-                            while let Ok(IoEvent::Bytes(more)) = rx.try_recv() {
-                                let mut t = term.lock();
-                                t.advance(&more);
+
+                            // 버퍼된 입력을 합쳐 프레임 수를 줄인다.
+                            //
+                            // ★try_recv 는 메시지를 채널에서 '꺼낸 뒤' 매칭한다. 종전 코드는
+                            //   `while let Ok(IoEvent::Bytes(more)) = rx.try_recv()` 였는데, 여기서
+                            //   Eof 를 꺼내면 패턴이 안 맞아 루프만 끝나고 그 Eof 는 그대로 버려졌다.
+                            //   셸이 마지막 출력 직후 종료하는 정상 시퀀스가 정확히 이 모양이라,
+                            //   대부분의 정상 종료에서 EOF 가 유실됐다(on_exit 미발화). 게다가 이후
+                            //   rx.recv() 는 reader 가 tx 를 붙들고 있어 영원히 깨어나지 않았다.
+                            loop {
+                                match rx.try_recv() {
+                                    Ok(IoEvent::Bytes(more)) => {
+                                        let mut t = term.lock();
+                                        t.advance(&more);
+                                    }
+                                    Ok(IoEvent::Eof) => {
+                                        saw_eof = true;
+                                        break;
+                                    }
+                                    Err(_) => break,
+                                }
                             }
 
                             // alacritty Event 큐 처리 (Title/Bell/ClipboardStore 등).
@@ -207,27 +235,35 @@ impl Session {
                             }
                         }
                         IoEvent::Eof => {
-                            let snap = {
-                                let mut t = term.lock();
-                                backend.lock().snapshot(&mut *t)
-                            };
-                            {
-                                let cb = callbacks.lock();
-                                if let Some(f) = cb.on_render.as_ref() {
-                                    f(&snap, "");
-                                }
-                            }
-                            let code = pty_arc.try_exit_code().unwrap_or(0);
-                            exit_code.store(code, Ordering::SeqCst);
-                            // 자식 감시 스레드와 경쟁한다 — swap 으로 먼저 온 쪽만 통지한다.
-                            if alive.swap(false, Ordering::SeqCst) {
-                                let cb = callbacks.lock();
-                                if let Some(f) = cb.on_exit.as_ref() {
-                                    f(code);
-                                }
-                            }
-                            break;
+                            saw_eof = true;
                         }
+                    }
+
+                    if saw_eof {
+                        // 마지막 화면을 한 번 더 내보낸 뒤 종료를 통지한다.
+                        let snap = {
+                            let mut t = term.lock();
+                            backend.lock().snapshot(&mut *t)
+                        };
+                        {
+                            let cb = callbacks.lock();
+                            if let Some(f) = cb.on_render.as_ref() {
+                                f(&snap, "");
+                            }
+                        }
+
+                        let code = pty_arc.try_exit_code().unwrap_or(0);
+                        exit_code.store(code, Ordering::SeqCst);
+
+                        // 자식 감시 스레드와 경쟁한다 — swap 으로 먼저 온 쪽만 통지한다.
+                        if alive.swap(false, Ordering::SeqCst) {
+                            let cb = callbacks.lock();
+                            if let Some(f) = cb.on_exit.as_ref() {
+                                f(code);
+                            }
+                        }
+
+                        break;
                     }
                 }
             })
@@ -248,11 +284,11 @@ impl Session {
             let code_w = Arc::clone(&self.exit_code);
             let cbs_w = Arc::clone(&self.callbacks);
 
-            std::thread::Builder::new()
+            let watcher = std::thread::Builder::new()
                 .name("rata-child-watch".into())
                 .spawn(move || loop {
                     if !alive_w.load(Ordering::SeqCst) {
-                        break; // EOF 경로가 이미 처리했다.
+                        break; // EOF 경로가 이미 처리했거나 Drop 이 내렸다.
                     }
 
                     if let Some(code) = pty_w.try_exit_code() {
@@ -266,9 +302,19 @@ impl Session {
                         break;
                     }
 
-                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    // 폴링 주기를 잘게 나눠 재운다 — Drop 이 alive 를 내리면 최대 30ms 안에 빠진다.
+                    // 한 번에 150ms 를 자면 destroy 가 그만큼 지연된다.
+                    for _ in 0..5 {
+                        if !alive_w.load(Ordering::SeqCst) {
+                            return;
+                        }
+
+                        std::thread::sleep(std::time::Duration::from_millis(30));
+                    }
                 })
                 .expect("spawn child watcher");
+
+            *self.watcher.lock() = Some(watcher);
         }
 
         *self.reader.lock() = Some(reader);
@@ -451,18 +497,39 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
+        // ① 콜백을 먼저 끊는다.
+        //
+        //    ★순서가 핵심이다. 이걸 하지 않으면 아래에서 자식을 죽이는 순간 감시 스레드가
+        //    종료를 감지해 on_exit 을 호출하는데, 그 클로저가 캡처한 호스트 인스턴스는
+        //    이미 소멸 중이다(호스트 측 use-after-free). alive 를 먼저 내려 감시 스레드가
+        //    통지 없이 빠지게 하고, 콜백 테이블 자체도 비운다.
+        self.alive.store(false, Ordering::SeqCst);
+        {
+            let mut cb = self.callbacks.lock();
+            *cb = Callbacks::default();
+        }
+
+        // ② 자식과 PTY 를 내린다.
         self.terminate(0);
 
-        // Inject synthetic EOF so pump wakes up regardless of reader state.
+        // pump 가 reader 상태와 무관하게 깨어나도록 합성 EOF 를 넣는다.
         if let Some(reader) = self.reader.lock().as_ref() {
-            let _ = reader.tx.send(crate::io::IoEvent::Eof);
+            let _ = reader.tx.try_send(crate::io::IoEvent::Eof);
         }
 
         let _ = self.writer.lock().take();
         let _ = self.pty.lock().take();
+
+        // ③ 스레드를 전부 회수한다. 감시 스레드를 join 하지 않으면 세션이 사라진 뒤에도
+        //    살아남아 Arc 로 붙든 자원을 만진다(그리고 DLL 이 언로드되면 실행 중 코드가 사라진다).
         if let Some(j) = self.pump.lock().take() {
             let _ = j.join();
         }
+
+        if let Some(j) = self.watcher.lock().take() {
+            let _ = j.join();
+        }
+
         let _ = self.reader.lock().take();
     }
 }
