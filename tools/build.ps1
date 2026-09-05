@@ -1,6 +1,9 @@
 # Build script for sc_shell.
-# 1) Build Rust DLL for x86_64 → sc_shell.dll (64-bit only — host app is Win64).
-#    Legacy 32-bit name (sc_shell32.dll) retained behind -Rust32 flag for compat.
+# 1) Build Rust DLL → sc_shell.dll. 이름은 비트수와 무관하게 <b>같다</b> — 32/64 를
+#    가르는 것은 <b>폴더</b>다(64: bin\, 32: bin\win32\).
+#    ★접미어(sc_shell32.dll)를 쓰지 않는다 — 로더는 이름으로 찾고, 단일 이름이어야
+#    델파이 래퍼가 IFDEF 없이 한 줄로 끝난다(SCShell.pas 의 RATA_DLL).
+#    32비트 프로세스는 64비트 DLL 을 로드할 수 없으므로 폴더 분리로 충돌 없이 공존한다.
 # 2) Compile Delphi demo (Win64) with dcc64.
 
 param(
@@ -38,7 +41,7 @@ function Ensure-Target([string]$Triple) {
     }
 }
 
-function Build-RustArch([string]$Triple, [string]$OutName) {
+function Build-RustArch([string]$Triple, [string]$OutSub) {
     Write-Host "== Building Rust DLL ($Triple) ==" -ForegroundColor Cyan
     Ensure-Target $Triple
 
@@ -55,13 +58,15 @@ function Build-RustArch([string]$Triple, [string]$OutName) {
     if (-not (Test-Path $built)) {
         throw "Expected DLL not found: $built"
     }
-    $dest = Join-Path $OutDir $OutName
+    $destDir = Join-Path $OutDir $OutSub
+    if (-not (Test-Path $destDir)) { New-Item -ItemType Directory -Force $destDir | Out-Null }
+    $dest = Join-Path $destDir 'sc_shell.dll'
     Copy-Item $built $dest -Force
     Write-Host "DLL -> $dest" -ForegroundColor Green
 }
 
-function Build-Rust64 { Build-RustArch -Triple $Target64 -OutName 'sc_shell.dll' }
-function Build-Rust32 { Build-RustArch -Triple $Target32 -OutName 'sc_shell32.dll' }
+function Build-Rust64 { Build-RustArch -Triple $Target64 -OutSub '' }
+function Build-Rust32 { Build-RustArch -Triple $Target32 -OutSub 'win32' }
 
 function Build-Delphi {
     Write-Host '== Compiling Delphi demo ==' -ForegroundColor Cyan

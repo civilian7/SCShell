@@ -19,7 +19,7 @@
 - **Automatic child process cleanup** — Job Object's `KILL_ON_JOB_CLOSE` flag prevents shell-tree leaks on host exit
 - **Panic isolation** — `catch_unwind` at the FFI boundary keeps Rust panics from propagating into the host
 - **Single-DLL deployment** — statically linked CRT, no transitive DLL dependencies
-- **Both 32-bit and 64-bit** — `sc_shell32.dll` / `sc_shell64.dll`
+- **Both 32-bit and 64-bit** — one name, `sc_shell.dll`; the folder tells them apart (`bin/`, `bin/win32/`)
 
 ## Requirements
 
@@ -80,8 +80,8 @@ SHELL/
 ```
 
 Artifacts:
-- `bin/sc_shell64.dll` — Rust DLL (x86_64)
-- `bin/sc_shell32.dll` — Rust DLL (i686)
+- `bin/sc_shell.dll` — Rust DLL (x86_64)
+- `bin/win32/sc_shell.dll` — Rust DLL (i686, same name)
 - `bin/DemoShell.exe` — Demo application
 
 ## Usage Example (Delphi)
@@ -137,7 +137,7 @@ end;
 +----------------------------------|-----------------+
                                    ▼
 +----------------------------------------------------+
-|     sc_shell64.dll / sc_shell32.dll (Rust)         |
+|              sc_shell.dll (Rust)                   |
 |  +-------+   +---------+   +----------+            |
 |  | FFI   |←→ | Session |←→ | TermHost |            |
 |  +-------+   +----┬────+   +----┬─────+            |

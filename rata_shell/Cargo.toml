@@ -7,8 +7,8 @@ description = "Embeddable Windows shell component (ConPTY + Ratatui) for Delphi 
 license = "MIT"
 
 [lib]
-# Output is renamed to sc_shell64.dll / sc_shell32.dll by tools\build.ps1
-# depending on target architecture.
+# 산출물 이름은 비트수와 무관하게 sc_shell.dll 하나다 — 32/64 는 tools\build.ps1 이
+# 폴더로 가른다(bin\ / bin\win32\). 접미어를 쓰지 않는 이유는 그 스크립트 머리말 참조.
 name = "sc_shell"
 crate-type = ["cdylib"]
 

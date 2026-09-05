@@ -19,7 +19,7 @@
 - **자식 프로세스 자동 정리** — Job Object의 `KILL_ON_JOB_CLOSE`로 호스트 종료 시 셸 트리 누수 없음
 - **Panic 격리** — `catch_unwind`로 FFI 경계에서 Rust panic이 호스트로 전파되지 않음
 - **단일 DLL 배포** — 정적 CRT 링크로 의존 DLL 없음
-- **32/64비트 모두 지원** — `sc_shell32.dll` / `sc_shell64.dll`
+- **32/64비트 모두 지원** — 이름은 `sc_shell.dll` 하나이고 폴더로 가른다(`bin/`, `bin/win32/`)
 
 ## 요구 사항
 
@@ -80,8 +80,8 @@ SHELL/
 ```
 
 산출물:
-- `bin/sc_shell64.dll` — Rust DLL (x86_64)
-- `bin/sc_shell32.dll` — Rust DLL (i686)
+- `bin/sc_shell.dll` — Rust DLL (x86_64)
+- `bin/win32/sc_shell.dll` — Rust DLL (i686, 같은 이름)
 - `bin/DemoShell.exe` — 데모 애플리케이션
 
 ## 사용 예 (델파이)
@@ -137,7 +137,7 @@ end;
 +----------------------------------|-----------------+
                                    ▼
 +----------------------------------------------------+
-|       sc_shell64.dll / sc_shell32.dll (Rust)       |
+|              sc_shell.dll (Rust)                   |
 |  +-------+   +---------+   +----------+            |
 |  | FFI   |←→ | Session |←→ | TermHost |            |
 |  +-------+   +----┬────+   +----┬─────+            |

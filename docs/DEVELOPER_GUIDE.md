@@ -63,7 +63,7 @@ end;
 
 출력:
 - `bin\sc_shell.dll` (64비트, 호스트 앱이 사용)
-- `bin\sc_shell32.dll` (32비트, 옵트인)
+- `bin\win32\sc_shell.dll` (32비트, 옵트인 — **이름은 같고 폴더로 가른다**)
 
 요구사항:
 - Rust 1.80+
@@ -414,7 +414,8 @@ SHELL/
 │   └── build.ps1                 # Rust + Delphi 빌드 통합
 └── bin/                          # 빌드 출력
     ├── sc_shell.dll              # 64비트 메인
-    ├── sc_shell32.dll            # 32비트 (옵트인)
+    ├── win32/
+    │   └── sc_shell.dll          # 32비트 (옵트인, 같은 이름)
     └── DemoShell.exe
 ```
 
